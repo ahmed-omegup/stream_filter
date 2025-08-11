@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  router:
+    build:
+      context: ./router
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    container_name: stream_filter_router
+    restart: unless-stopped
+    networks:
+      - stream_filter_network
+
+  # Placeholder for future services
+  # producer:
+  #   build:
+  #     context: ./producer
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8001:8001"
+  #   container_name: stream_filter_producer
+  #   restart: unless-stopped
+  #   networks:
+  #     - stream_filter_network
+  #   depends_on:
+  #     - router
+
+  # filter:
+  #   build:
+  #     context: ./filter
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "8002:8002"
+  #   container_name: stream_filter_filter
+  #   restart: unless-stopped
+  #   networks:
+  #     - stream_filter_network
+  #   depends_on:
+  #     - router
+
+networks:
+  stream_filter_network:
+    driver: bridge
+
+volumes:
+  stream_filter_data:
+    driver: local
