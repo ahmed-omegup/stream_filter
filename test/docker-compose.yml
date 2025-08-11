@@ -12,19 +12,21 @@ services:
     networks:
       - stream_filter_network
 
-  # Placeholder for future services
-  # producer:
-  #   build:
-  #     context: ./producer
-  #     dockerfile: Dockerfile
-  #   ports:
-  #     - "8001:8001"
-  #   container_name: stream_filter_producer
-  #   restart: unless-stopped
-  #   networks:
-  #     - stream_filter_network
-  #   depends_on:
-  #     - router
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: stream_filter_producer
+    environment:
+      - MAX_DATE=100000
+      - ROUTER_HOST=router
+      - ROUTER_PORT=8000
+      - EVENT_COUNT=2000000
+    networks:
+      - stream_filter_network
+    depends_on:
+      - router
+    restart: "no"  # Producer runs once and exits
 
   # filter:
   #   build:
