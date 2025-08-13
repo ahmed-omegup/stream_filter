@@ -4,7 +4,7 @@ import { customers, MAX_DATE } from './customers.ts';
 
 // Environment variables
 const PRODUCER_PORT = parseInt(process.env.PRODUCER_PORT || "8080");
-const ROUTER_HOST = process.env.ROUTER_HOST || "router";
+const ROUTER_HOST = process.env.ROUTER_HOST || "localhost";
 const ROUTER_PORT = parseInt(process.env.ROUTER_PORT || "8000");
 
 // Build interval trees per customer type

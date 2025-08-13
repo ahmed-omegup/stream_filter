@@ -48,6 +48,22 @@ services:
       - filter
     restart: "no"  # Producer runs once and exits
 
+  filter-gleam:
+    build:
+      context: ./filter/gleam/stream_filter
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    container_name: stream_filter_filter_gleam
+    environment:
+      - NUM_CUSTOMERS=${NUM_CUSTOMERS:-100000}
+      - MAX_DATE=${MAX_DATE:-100000}
+      - MAX_SPAN=${MAX_SPAN:-10}
+    networks:
+      - stream_filter_network
+    depends_on:
+      - router
+
   # filter:
   #   build:
   #     context: ./filter
