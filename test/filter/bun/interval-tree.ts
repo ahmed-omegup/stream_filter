@@ -58,7 +58,18 @@ export class TreeNode {
     } else if (customer.start > this.mid) {
       this.right!.insert(customer);
     } else {
-      this.partialCustomers.push(customer); // Still spans both sides
+      // Customer spans both sides
+      if (customer.splitsLeft) {
+        // Duplicate customer into both children with decremented splits
+        const leftCustomer: Customer = { ...customer, splitsLeft: customer.splitsLeft - 1 };
+        const rightCustomer: Customer = { ...customer, splitsLeft: customer.splitsLeft - 1 };
+        
+        this.left!.insert(leftCustomer);
+        this.right!.insert(rightCustomer);
+      } else {
+        // No splits left, keep in partial
+        this.partialCustomers.push(customer);
+      }
     }
   }
 

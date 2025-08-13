@@ -8,7 +8,6 @@ services:
     ports:
       - "8000:8000"
     container_name: stream_filter_router
-    restart: unless-stopped
     networks:
       - stream_filter_network
 
@@ -23,6 +22,7 @@ services:
       - NUM_CUSTOMERS=${NUM_CUSTOMERS:-100000}
       - MAX_DATE=${MAX_DATE:-100000}
       - MAX_SPAN=${MAX_SPAN:-10}
+      - MAX_SPLITS=${MAX_SPLITS:-3}
       - PRODUCER_PORT=${PRODUCER_PORT:-8080}
       - ROUTER_HOST=router
       - ROUTER_PORT=8000
@@ -30,7 +30,6 @@ services:
       - stream_filter_network
     depends_on:
       - router
-    restart: unless-stopped
 
   producer:
     build:
@@ -56,7 +55,6 @@ services:
   #   ports:
   #     - "8002:8002"
   #   container_name: stream_filter_filter
-  #   restart: unless-stopped
   #   networks:
   #     - stream_filter_network
   #   depends_on:

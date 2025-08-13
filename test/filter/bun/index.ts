@@ -66,16 +66,6 @@ const server = createServer((sock: Socket) => {
       return;
     }
 
-    if (event && event.done) {
-      console.log('Finished processing events at', new Date().toISOString());
-      return;
-    }
-
-    if (event == null || event.type == null) {
-      console.warn("event missing 'type'");
-      return;
-    }
-
     const root = rootsPerType[event.type];
     if (!root) {
       console.warn(`No customers for type ${event.type}`);
@@ -83,22 +73,14 @@ const server = createServer((sock: Socket) => {
     }
 
     // Dispatch to matching customers
-    let matchCount = 0;
-    root.dispatch(event, (customerId: number) => {
-      matchCount++;
-      send(customerId);
-    });
+    root.dispatch(event, send);
     
-    if (matchCount === 0) {
-      console.warn(`No matches for event date=${event.date} type=${event.type}`);
-    } else {
-      console.log(`Sent ${matchCount} customer IDs to router`);
-    }
   });
 
   sock.on('data', onData);
 
   function finish(tag?: string) {
+    console.log('Finished processing events at', new Date().toISOString());
     if (startedAt != null) {
       const ms = Date.now() - startedAt;
       console.log(`Duration (ms): ${ms}`);
@@ -110,6 +92,8 @@ const server = createServer((sock: Socket) => {
   sock.on('close', () => {
     console.log('Producer disconnected');
     finish('close');
+    router.end();
+    server.close()
   });
   
   sock.on('error', (e: Error) => finish(`error: ${e.message}`));
