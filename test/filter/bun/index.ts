@@ -78,7 +78,7 @@ function processMessages() {
 
     if (event && event.done) {
       console.log('Received done event, finishing...');
-      finishProcessing();
+      // Don't finish immediately, let the socket close handler do it
       break;
     }
 
@@ -117,8 +117,16 @@ function finishProcessing() {
     console.log(`Duration (ms): ${ms}`);
     console.log(`Handled messages: ${handled}`);
   }
+  
+  // Properly close router connection
+  console.log('Closing router connection...');
   router.end();
-  server.close()
+  
+  // Close server after a short delay to ensure router disconnect is processed
+  setTimeout(() => {
+    console.log('Closing server...');
+    server.close();
+  }, 100);
 }
 
 // TCP server for producers - focuses only on reading and queuing
@@ -141,9 +149,12 @@ const server = createServer((sock: Socket) => {
     console.log('Producer disconnected');
     // Process any remaining messages
     if (messageQueue.length > 0) {
+      console.log(`Processing remaining ${messageQueue.length} messages...`);
       processMessages();
+    } else {
+      // No more messages, finish immediately
+      finishProcessing();
     }
-    finishProcessing();
   });
   
   sock.on('error', (e: Error) => {
