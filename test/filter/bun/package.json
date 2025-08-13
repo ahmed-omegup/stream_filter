@@ -1,0 +1,16 @@
+{
+  "name": "filter-bun",
+  "version": "1.0.0",
+  "description": "Stream filter service with interval tree implementation (Bun)",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun --watch index.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "typescript": "^5.0.0"
+  }
+}

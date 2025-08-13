@@ -12,20 +12,41 @@ services:
     networks:
       - stream_filter_network
 
+  filter:
+    build:
+      context: ./filter/bun
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    container_name: stream_filter_filter
+    environment:
+      - NUM_CUSTOMERS=${NUM_CUSTOMERS:-100000}
+      - MAX_DATE=${MAX_DATE:-100000}
+      - MAX_SPAN=${MAX_SPAN:-10}
+      - PRODUCER_PORT=${PRODUCER_PORT:-8080}
+      - ROUTER_HOST=router
+      - ROUTER_PORT=8000
+    networks:
+      - stream_filter_network
+    depends_on:
+      - router
+    restart: unless-stopped
+
   producer:
     build:
       context: ./producer
       dockerfile: Dockerfile
     container_name: stream_filter_producer
     environment:
-      - MAX_DATE=100000
-      - ROUTER_HOST=router
-      - ROUTER_PORT=8000
-      - EVENT_COUNT=2000000
+      - MAX_DATE=${MAX_DATE:-100000}
+      - MSS=${MSS:-65000}
+      - ROUTER_HOST=filter
+      - ROUTER_PORT=8080
+      - EVENT_COUNT=${EVENT_COUNT:-2000000}
     networks:
       - stream_filter_network
     depends_on:
-      - router
+      - filter
     restart: "no"  # Producer runs once and exits
 
   # filter:

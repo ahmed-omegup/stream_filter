@@ -2,8 +2,9 @@ import { connect } from "node:net";
 
 const MAX_DATE = parseInt(process.env.MAX_DATE || "100000");
 const ROUTER_HOST = process.env.ROUTER_HOST || "localhost";
-const ROUTER_PORT = parseInt(process.env.ROUTER_PORT || "8000");
+const ROUTER_PORT = parseInt(process.env.ROUTER_PORT || "8080");
 const EVENT_COUNT = parseInt(process.env.EVENT_COUNT || "2000000");
+const MSS = parseInt(process.env.MSS || "65000"); // Maximum segment size
 
 interface Event {
   id: number;
@@ -30,15 +31,13 @@ function* handleMessages(): Generator<string, void, unknown> {
   console.log("Producer took", new Date().getTime() - startTime.getTime(), "ms to send", EVENT_COUNT, "events");
 }
 
-const MSS = 65000; // Maximum segment size
-
 const handleConnection = (): void => {
-  console.log(`Connecting to router at ${ROUTER_HOST}:${ROUTER_PORT}`);
+  console.log(`Connecting to filter at ${ROUTER_HOST}:${ROUTER_PORT}`);
   
   const socket = connect(ROUTER_PORT, ROUTER_HOST);
   
   socket.on('connect', () => {
-    console.log('Connected to router');
+    console.log('Connected to filter');
     let buffer = Buffer.allocUnsafe(MSS);
     let offset = 0;
     
