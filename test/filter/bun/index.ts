@@ -35,9 +35,9 @@ function send(customerId: number): void {
 }
 
 function makeFramer(onMessage: (body: Buffer) => void) {
-  let buf = Buffer.alloc(0);
+  let buf: Buffer = Buffer.alloc(0);
   return (chunk: Buffer) => {
-    buf = Buffer.concat([buf, chunk]);
+    buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
     while (buf.length >= 4) {
       const len = buf.readUInt32BE(0);
       if (buf.length < 4 + len) break;
@@ -48,14 +48,24 @@ function makeFramer(onMessage: (body: Buffer) => void) {
   };
 }
 
-// TCP server for producers
-const server = createServer((sock: Socket) => {
-  console.log('Producer connected');
-  let startedAt: number | null = null; // first packet time
-  let handled = 0;
+// Message queue for processing
+const messageQueue: Buffer[] = [];
+let processing = false;
+let startedAt: number | null = null;
+let handled = 0;
 
-  const onData = makeFramer((body: Buffer) => {
-    if (startedAt === null) startedAt = Date.now();
+// Process messages from queue
+function processMessages() {
+  if (processing || messageQueue.length === 0) return;
+  processing = true;
+
+  while (messageQueue.length > 0) {
+    const body = messageQueue.shift()!;
+    
+    if (startedAt === null) {
+      console.log('First event received, starting timer...');
+      startedAt = Date.now();
+    }
     handled += 1;
 
     let event: Event;
@@ -63,40 +73,82 @@ const server = createServer((sock: Socket) => {
       event = JSON.parse(body.toString('utf8'));
     } catch (e) {
       console.error('bad JSON:', e instanceof Error ? e.message : 'unknown error');
-      return;
+      continue;
+    }
+
+    if (event && event.done) {
+      console.log('Received done event, finishing...');
+      finishProcessing();
+      break;
+    }
+
+    if (event == null || event.type == null) {
+      console.warn("event missing 'type'");
+      continue;
     }
 
     const root = rootsPerType[event.type];
     if (!root) {
       console.warn(`No customers for type ${event.type}`);
-      return;
+      continue;
     }
 
     // Dispatch to matching customers
-    root.dispatch(event, send);
+    try {
+      root.dispatch(event, (customerId: number) => send(customerId));
+    } catch (e) {
+      console.error(`Error during dispatch for event ${handled}:`, e instanceof Error ? e.message : 'unknown error');
+      console.error(`Event details: id=${event.id}, date=${event.date}, type=${event.type}`);
+    }
+  }
+
+  processing = false;
+  
+  // Check if more messages arrived while processing
+  if (messageQueue.length > 0) {
+    setImmediate(processMessages);
+  }
+}
+
+function finishProcessing() {
+  console.log('Finished processing events at', new Date().toISOString());
+  if (startedAt != null) {
+    const ms = Date.now() - startedAt;
+    console.log(`Duration (ms): ${ms}`);
+    console.log(`Handled messages: ${handled}`);
+  }
+  router.end();
+  server.close()
+}
+
+// TCP server for producers - focuses only on reading and queuing
+const server = createServer((sock: Socket) => {
+  console.log('Producer connected');
+
+  const onData = makeFramer((body: Buffer) => {
+    // Just queue the message, don't process it here
+    messageQueue.push(body);
     
+    // Trigger processing if not already running
+    if (!processing) {
+      setImmediate(processMessages);
+    }
   });
 
   sock.on('data', onData);
 
-  function finish(tag?: string) {
-    console.log('Finished processing events at', new Date().toISOString());
-    if (startedAt != null) {
-      const ms = Date.now() - startedAt;
-      console.log(`Duration (ms): ${ms}`);
-      console.log(`Handled messages: ${handled}`);
-    }
-    if (tag && tag !== 'close') console.error(`producer ${tag}`);
-  }
-
   sock.on('close', () => {
     console.log('Producer disconnected');
-    finish('close');
-    router.end();
-    server.close()
+    // Process any remaining messages
+    if (messageQueue.length > 0) {
+      processMessages();
+    }
+    finishProcessing();
   });
   
-  sock.on('error', (e: Error) => finish(`error: ${e.message}`));
+  sock.on('error', (e: Error) => {
+    console.error(`Producer socket error: ${e.message}`);
+  });
 });
 
 server.listen(PRODUCER_PORT, '0.0.0.0', () => {
