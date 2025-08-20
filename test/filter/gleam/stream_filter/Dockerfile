@@ -1,10 +1,10 @@
 FROM erlang:28-alpine
 
 # Install Gleam
-RUN wget https://github.com/gleam-lang/gleam/releases/download/v1.6.2/gleam-v1.6.2-x86_64-unknown-linux-musl.tar.gz && \
-    tar -xzf gleam-v1.6.2-x86_64-unknown-linux-musl.tar.gz && \
+RUN wget https://github.com/gleam-lang/gleam/releases/download/v1.12.0/gleam-v1.12.0-x86_64-unknown-linux-musl.tar.gz && \
+    tar -xzf gleam-v1.12.0-x86_64-unknown-linux-musl.tar.gz && \
     mv gleam /usr/local/bin/ && \
-    rm gleam-v1.6.2-x86_64-unknown-linux-musl.tar.gz
+    rm gleam-v1.12.0-x86_64-unknown-linux-musl.tar.gz
 
 WORKDIR /app
 

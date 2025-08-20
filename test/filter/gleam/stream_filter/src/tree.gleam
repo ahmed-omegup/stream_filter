@@ -84,65 +84,54 @@ pub fn handle(state: Node, msg: NodeMessage) -> actor.Next(Node, NodeMessage) {
 }
 
 fn insert_customer(state: Node, customer: Customer) -> Node {
-  case state {
-    Node(min, max, mid, full, value) ->
-      case customer {
-        Customer(_, s, e) ->
-          case s <= min && e >= max {
-            True -> Node(min, max, mid, [customer, ..full], value)
-            False ->
-              case value {
-                Partial(data) ->
-                  case list.length(data) + 1 > split_threshold && min != max {
-                    True -> {
-                      case start(min, mid), start(mid + 1, max) {
-                        Ok(actor.Started(_, left)), Ok(actor.Started(_, right)) -> {
-                          redistribute([customer, ..data], left, right, mid)
-                          Node(min, max, mid, full, Parent(left, right))
-                        }
-                        _, _ -> state
-                      }
-                    }
-                    False ->
-                      Node(min, max, mid, full, Partial([customer, ..data]))
-                  }
-                Parent(left, right) -> {
-                  route_customer(customer, left, right, mid)
-                  state
-                }
-              }
+  let Node(min, max, mid, full, value) = state
+  let Customer(_, s, e) = customer
+  case s <= min && e >= max {
+    True -> Node(min, max, mid, [customer, ..full], value)
+    False ->
+      case value {
+        Partial(data) ->
+          case list.length(data) + 1 > split_threshold && min != max {
+            True -> {
+              let assert Ok(actor.Started(_, left)) = start(min, mid)
+              let assert Ok(actor.Started(_, right)) = start(mid + 1, max)
+              redistribute([customer, ..data], left, right, mid)
+              Node(min, max, mid, full, Parent(left, right))
+            }
+            False -> Node(min, max, mid, full, Partial([customer, ..data]))
           }
+        Parent(left, right) -> {
+          route_customer(customer, left, right, mid)
+          state
+        }
       }
   }
 }
 
 fn dispatch(state: Node, date: Int, fun: fn(Int) -> Nil) {
-  case state {
-    Node(_, _, mid, full, value) -> {
-      case value {
-        Partial(data) -> {
-          list.each(data, fn(item) {
-            case item {
-              Customer(id, s, e) ->
-                case date >= s && date <= e {
-                  True -> fun(id)
-                  False -> Nil
-                }
-            }
-          })
-        }
-        Parent(left, right) -> {
-          case date <= mid {
-            True -> actor.send(left, Dispatch(date, fun))
-            False -> actor.send(right, Dispatch(date, fun))
-          }
-        }
-      }
-      list.each(full, fn(item) {
+  let Node(_, _, mid, full, value) = state
+  case value {
+    Partial(data) -> {
+      list.each(data, fn(item) {
         case item {
-          Customer(id, _, _) -> fun(id)
+          Customer(id, s, e) ->
+            case date >= s && date <= e {
+              True -> fun(id)
+              False -> Nil
+            }
         }
       })
     }
+    Parent(left, right) -> {
+      case date <= mid {
+        True -> actor.send(left, Dispatch(date, fun))
+        False -> actor.send(right, Dispatch(date, fun))
+      }
+    }
   }
+  list.each(full, fn(item) {
+    case item {
+      Customer(id, _, _) -> fun(id)
+    }
+  })
 }

@@ -1,4 +1,4 @@
-import { connect } from "node:net";
+import { connect, Socket } from "node:net";
 
 const MAX_DATE = parseInt(process.env.MAX_DATE || "100000");
 const ROUTER_HOST = process.env.ROUTER_HOST || "localhost";
@@ -12,12 +12,35 @@ interface Event {
   type: string;
 }
 
+/** Wait for filter to be ready */
+async function waitForFilter(): Promise<Socket> {
+  console.log(`Waiting for filter at ${ROUTER_HOST}:${ROUTER_PORT} to be ready...`);
+
+  return new Promise<Socket>((resolve) => {
+    const checkConnection = () => {
+      const socket = connect(ROUTER_PORT, ROUTER_HOST);
+
+      socket.on('connect', () => {
+        console.log('Filter is ready!');
+        resolve(socket);
+      });
+
+      socket.on('error', () => {
+        // Filter not ready yet, try again in 1 second
+        setTimeout(checkConnection, 1000);
+      });
+    };
+
+    checkConnection();
+  });
+}
+
 /** Generator function to create stream events */
 function* handleMessages(): Generator<string, void, unknown> {
   let id = 0;
   const startTime = new Date();
   console.log("Producer started sending events at", startTime.toISOString());
-  
+
   for (let i = 0; i < EVENT_COUNT; i++) {
     const event: Event = {
       id: id++,
@@ -31,42 +54,8 @@ function* handleMessages(): Generator<string, void, unknown> {
   console.log("Producer took", new Date().getTime() - startTime.getTime(), "ms to send", EVENT_COUNT, "events");
 }
 
-const handleConnection = (): void => {
-  console.log(`Connecting to filter at ${ROUTER_HOST}:${ROUTER_PORT}`);
-  
-  const socket = connect(ROUTER_PORT, ROUTER_HOST);
-  
-  socket.on('connect', () => {
-    console.log('Connected to filter');
-    let buffer = Buffer.allocUnsafe(MSS);
-    let offset = 0;
-    
-    for (const message of handleMessages()) {
-      const messageBytes = Buffer.from(message, 'utf8');
-      const newOffset = offset + messageBytes.length + 4; // 4 bytes for length prefix
-      
-      if (newOffset > MSS) {
-        // Send current buffer and start a new one
-        socket.write(buffer.subarray(0, offset));
-        buffer = Buffer.allocUnsafe(MSS);
-        offset = 0;
-      }
-      
-      // Write length prefix (4 bytes) followed by message
-      buffer.writeUInt32BE(messageBytes.length, offset);
-      messageBytes.copy(buffer, offset + 4);
-      offset += messageBytes.length + 4;
-    }
-    
-    // Send remaining data
-    if (offset > 0) {
-      socket.write(buffer.subarray(0, offset));
-    }
-    
-    socket.end();
-    console.log('Data sent, connection closed');
-  });
-
+const handleConnection = (socket: Socket): void => {
+  console.log(`Connected to filter at ${ROUTER_HOST}:${ROUTER_PORT}`);
   socket.on('error', (err: Error) => {
     console.error('Connection error:', err);
     process.exit(1);
@@ -76,7 +65,43 @@ const handleConnection = (): void => {
     console.log('Connection closed');
     process.exit(0);
   });
+
+  console.log('Connected to filter');
+  let buffer = Buffer.allocUnsafe(MSS);
+  let offset = 0;
+
+  for (const message of handleMessages()) {
+    const messageBytes = Buffer.from(message, 'utf8');
+    const newOffset = offset + messageBytes.length + 4; // 4 bytes for length prefix
+
+    if (newOffset > MSS) {
+      // Send current buffer and start a new one
+      socket.write(buffer.subarray(0, offset));
+      buffer = Buffer.allocUnsafe(MSS);
+      offset = 0;
+    }
+
+    // Write length prefix (4 bytes) followed by message
+    buffer.writeUInt32BE(messageBytes.length, offset);
+    messageBytes.copy(buffer, offset + 4);
+    offset += messageBytes.length + 4;
+  }
+
+  // Send remaining data
+  if (offset > 0) {
+    socket.write(buffer.subarray(0, offset));
+  }
+
+  socket.end();
+  console.log('Data sent, connection closed');
 };
 
-// Start the producer
-handleConnection();
+// Start the producer after waiting for filter to be ready
+async function main() {
+  handleConnection(await waitForFilter());
+}
+
+main().catch((err) => {
+  console.error('Producer error:', err);
+  process.exit(1);
+});

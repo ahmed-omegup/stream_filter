@@ -1,3 +1,4 @@
+import envoy
 import gleam/bit_array
 import gleam/dynamic/decode
 import gleam/erlang/process
@@ -7,23 +8,17 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 import gleam/string
 import gleam/time/duration
 import gleam/time/timestamp
 import glisten/socket
-import glisten/socket/options.{ActiveMode, Passive}
+import glisten/socket/options.{ActiveMode, Any, Ip, Passive}
 import glisten/tcp
 import mug
 import prng/random
 import prng/seed
 import tree
-import envoy
-
-const max_date = 100_000
-
-const max_span = 10
-
-const num_customers = 100_000
 
 type BufferState {
   BufferState(size: Int, buffer: BitArray)
@@ -39,6 +34,10 @@ type GlobalState {
   )
 }
 
+fn env(env: String, default: a, parse: fn (String) -> Result(a, Nil)) -> a {
+  result.unwrap(result.try(envoy.get(env), parse), default)
+}
+
 pub fn main() {
   let event_decoder = {
     use id <- decode.field("id", decode.int)
@@ -46,63 +45,54 @@ pub fn main() {
     use typ <- decode.field("type", decode.string)
     decode.success(Event(id:, date:, typ:))
   }
-  
+
   // Get router host and port from environment variables
-  let router_host = case envoy.get("ROUTER_HOST") {
-    Ok(host) -> host
-    Error(_) -> "localhost"
-  }
-  let router_port = case envoy.get("ROUTER_PORT") {
-    Ok(port_str) -> case int.parse(port_str) {
-      Ok(port) -> port
-      Error(_) -> 8000
-    }
-    Error(_) -> 8000
-  }
-  
-  let listen_res = tcp.listen(8080, [ActiveMode(Passive)])
-  case listen_res {
-    Ok(listener) -> {
-      let assert Ok(root) = tree.start(1, max_date)
-      let customers = generate_customers(num_customers)
-      customers
-      |> list.each(fn(c) { actor.send(root.data, tree.Insert(c)) })
-      let assert Ok(router_socket) =
-        mug.new(router_host, port: router_port)
-        |> mug.timeout(milliseconds: 5000)
-        |> mug.connect()
+  let router_host = env("ROUTER_HOST", "127.0.0.1", Ok)
 
-      let assert Ok(actor.Started(_, stream)) =
-        actor.new(GlobalState(
-          root: root.data,
-          event_decoder: event_decoder,
-          router: router_socket,
-        ))
-        |> actor.on_message(handle_message)
-        |> actor.start
+  let router_port = env("ROUTER_PORT", 8000, int.parse)
 
-      io.println("Listening on 0.0.0.0:8080")
-      case tcp.accept(listener) {
-        Ok(socket) -> {
-          case recv(socket, None, 0, Nothing, stream) {
-            Ok(#(ms, n)) -> {
-              io.println("Duration (ms): " <> int.to_string(ms))
-              io.println("Handled messages: " <> int.to_string(n))
-            }
-            Error(e) -> {
-              io.print_error("Receive loop failed: ")
-              io.println_error(string.inspect(e))
-            }
-          }
+  let num_customers = env("NUM_CUSTOMERS", 100_000, int.parse)
+
+  let max_date = env("MAX_DATE", 100_000, int.parse)
+
+  let max_span = env("MAX_SPAN", 10, int.parse)
+
+  let listen_res = tcp.listen(8080, [ActiveMode(Passive), Ip(Any)])
+  let assert Ok(listener) = listen_res as "Listen failed"
+  let assert Ok(root) = tree.start(1, max_date)
+  let customers = generate_customers(num_customers, max_date, max_span)
+  customers
+  |> list.each(fn(c) { actor.send(root.data, tree.Insert(c)) })
+  let assert Ok(router_socket) =
+    mug.new(router_host, port: router_port)
+    |> mug.timeout(milliseconds: 5000)
+    |> mug.connect()
+
+  let assert Ok(actor.Started(_, stream)) =
+    actor.new(GlobalState(
+      root: root.data,
+      event_decoder: event_decoder,
+      router: router_socket,
+    ))
+    |> actor.on_message(handle_message)
+    |> actor.start
+
+  io.println("Listening on 0.0.0.0:8080")
+  case tcp.accept(listener) {
+    Ok(socket) -> {
+      case recv(socket, None, 0, Nothing, stream) {
+        Ok(#(ms, n)) -> {
+          io.println("Duration (ms): " <> int.to_string(ms))
+          io.println("Handled messages: " <> int.to_string(n))
         }
         Error(e) -> {
-          io.println("Accept failed")
+          io.print_error("Receive loop failed: ")
           io.println_error(string.inspect(e))
         }
       }
     }
     Error(e) -> {
-      io.println("Listen failed")
+      io.println("Accept failed")
       io.println_error(string.inspect(e))
     }
   }
@@ -117,21 +107,12 @@ fn recv(
 ) -> Result(#(Int, Int), socket.SocketReason) {
   case tcp.receive(socket, 0) {
     Ok(chunk) -> {
-      case start_opt {
-        None -> {
-          recv_timed(
-            socket,
-            messages,
-            chunk,
-            buffer,
-            timestamp.system_time(),
-            stream,
-          )
-        }
-        Some(start) -> {
-          recv_timed(socket, messages, chunk, buffer, start, stream)
-        }
+      let start = case start_opt {
+        None -> timestamp.system_time()
+        Some(start) -> start
       }
+      let #(buffer, messages) = handle_prefixed(buffer, chunk, messages, stream)
+      recv(socket, Some(start), messages, buffer, stream)
     }
     Error(e) -> {
       case start_opt {
@@ -148,18 +129,6 @@ fn recv(
       }
     }
   }
-}
-
-fn recv_timed(
-  socket: socket.Socket,
-  messages: Int,
-  chunk: BitArray,
-  buffer: BufferState,
-  start: timestamp.Timestamp,
-  stream: process.Subject(BitArray),
-) -> Result(#(Int, Int), socket.SocketReason) {
-  let #(buffer, messages) = handle_prefixed(buffer, chunk, messages, stream)
-  recv(socket, Some(start), messages, buffer, stream)
 }
 
 fn split(chunk: BitArray, size: Int) -> Option(#(BitArray, BitArray)) {
@@ -239,13 +208,17 @@ fn handle_prefixed(
   }
 }
 
-fn generate_customer(id: Int) -> tree.Customer {
+fn generate_customer(id: Int, max_date: Int, max_span: Int) -> tree.Customer {
   let start = random.sample(random.int(1, max_date - max_span), seed.random())
   let span = random.sample(random.int(1, max_span), seed.random())
   tree.Customer(id, start, start + span)
 }
 
-fn generate_customers(n: Int) -> List(tree.Customer) {
+fn generate_customers(
+  n: Int,
+  max_date: Int,
+  max_span: Int,
+) -> List(tree.Customer) {
   list.range(1, n)
-  |> list.map(generate_customer)
+  |> list.map(fn(date) { generate_customer(date, max_date, max_span) })
 }

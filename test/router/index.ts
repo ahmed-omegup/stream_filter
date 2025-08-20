@@ -28,6 +28,6 @@ const server = createServer((socket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Listening on 0.0.0.0:${PORT}`);
 });
