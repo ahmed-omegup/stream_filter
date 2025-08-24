@@ -13,7 +13,7 @@ import gleam/string
 import gleam/time/duration
 import gleam/time/timestamp
 import glisten/socket
-import glisten/socket/options.{ActiveMode, Any, Ip, Passive}
+import glisten/socket/options.{ActiveMode, Any, Ip, Passive, Buffer}
 import glisten/tcp
 import mug
 import prng/random
@@ -26,6 +26,14 @@ type BufferState {
   Nothing
 }
 
+type BatchMessage {
+  BatchCompleted(Int)
+}
+
+type Batch {
+  Batch(current: Int, waiting: Int, packets: Int)
+}
+
 type GlobalState {
   GlobalState(
     root: process.Subject(tree.NodeMessage),
@@ -34,9 +42,10 @@ type GlobalState {
   )
 }
 
-fn env(env: String, default: a, parse: fn (String) -> Result(a, Nil)) -> a {
+fn env(env: String, default: a, parse: fn(String) -> Result(a, Nil)) -> a {
   result.unwrap(result.try(envoy.get(env), parse), default)
 }
+
 
 pub fn main() {
   let event_decoder = {
@@ -48,25 +57,43 @@ pub fn main() {
 
   // Get router host and port from environment variables
   let router_host = env("ROUTER_HOST", "127.0.0.1", Ok)
-
   let router_port = env("ROUTER_PORT", 8000, int.parse)
-
   let num_customers = env("NUM_CUSTOMERS", 100_000, int.parse)
-
   let max_date = env("MAX_DATE", 100_000, int.parse)
-
   let max_span = env("MAX_SPAN", 10, int.parse)
 
-  let listen_res = tcp.listen(8080, [ActiveMode(Passive), Ip(Any)])
+  let listen_res = tcp.listen(8080, [ActiveMode(Passive), Ip(Any), 
+  Buffer(10240),        // Very small buffer - should fill quickly
+  options.Nodelay(False),     // Enable Nagle algorithm to batch packets
+  options.SendTimeout(100),  // Short send timeout
+  options.Backlog(10),         // Very small connection backlog
+])
   let assert Ok(listener) = listen_res as "Listen failed"
-  let assert Ok(root) = tree.start(1, max_date)
-  let customers = generate_customers(num_customers, max_date, max_span)
-  customers
-  |> list.each(fn(c) { actor.send(root.data, tree.Insert(c)) })
+
   let assert Ok(router_socket) =
     mug.new(router_host, port: router_port)
     |> mug.timeout(milliseconds: 5000)
     |> mug.connect()
+
+  // Create batch completion subject
+  let batch_subject = process.new_subject()
+
+  // Create root with batch notifier
+  let assert Ok(root) =
+    tree.start(1, max_date, fn(batch_id) {
+      actor.send(batch_subject, BatchCompleted(batch_id))
+    })
+
+  let customers = generate_customers(num_customers, max_date, max_span)
+  customers
+  |> list.each(fn(c) {
+    actor.send(
+      root.data,
+      tree.Insert(c, fn(batch_id) {
+        actor.send(root.data, tree.BatchComplete(batch_id, True))
+      }),
+    )
+  })
 
   let assert Ok(actor.Started(_, stream)) =
     actor.new(GlobalState(
@@ -80,7 +107,9 @@ pub fn main() {
   io.println("Listening on 0.0.0.0:8080")
   case tcp.accept(listener) {
     Ok(socket) -> {
-      case recv(socket, None, 0, Nothing, stream) {
+      case
+        recv(socket, None, 0, Nothing, stream, batch_subject, Batch(1, 0, 0))
+      {
         Ok(#(ms, n)) -> {
           io.println("Duration (ms): " <> int.to_string(ms))
           io.println("Handled messages: " <> int.to_string(n))
@@ -98,12 +127,73 @@ pub fn main() {
   }
 }
 
+fn time_from(start: timestamp.Timestamp) {
+  let now = timestamp.system_time()
+  let d = timestamp.difference(start, now)
+  let #(secs, nanos) = duration.to_seconds_and_nanoseconds(d)
+  let ms_from_ns = nanos / 1_000_000
+  secs * 1000 + ms_from_ns
+}
+
 fn recv(
   socket: socket.Socket,
   start_opt: Option(timestamp.Timestamp),
   messages: Int,
   buffer: BufferState,
   stream: process.Subject(BitArray),
+  batch_subject: process.Subject(BatchMessage),
+  batch: Batch,
+) -> Result(#(Int, Int), socket.SocketReason) {
+  case batch.waiting > 3 {
+    True -> {
+      case process.receive(batch_subject, 1000) {
+        Ok(BatchCompleted(_)) ->
+          proceed_recv(
+            socket,
+            start_opt,
+            messages,
+            buffer,
+            stream,
+            batch_subject,
+            Batch(..batch, waiting: batch.waiting - 1),
+          )
+        Error(e) -> {
+          io.println(
+            "Failed to receive batch completion: " <> string.inspect(e),
+          )
+          recv(
+            socket,
+            start_opt,
+            messages,
+            buffer,
+            stream,
+            batch_subject,
+            batch,
+          )
+        }
+      }
+    }
+    False ->
+      proceed_recv(
+        socket,
+        start_opt,
+        messages,
+        buffer,
+        stream,
+        batch_subject,
+        batch,
+      )
+  }
+}
+
+fn proceed_recv(
+  socket: socket.Socket,
+  start_opt: Option(timestamp.Timestamp),
+  messages: Int,
+  buffer: BufferState,
+  stream: process.Subject(BitArray),
+  batch_subject: process.Subject(BatchMessage),
+  batch: Batch,
 ) -> Result(#(Int, Int), socket.SocketReason) {
   case tcp.receive(socket, 0) {
     Ok(chunk) -> {
@@ -112,7 +202,25 @@ fn recv(
         Some(start) -> start
       }
       let #(buffer, messages) = handle_prefixed(buffer, chunk, messages, stream)
-      recv(socket, Some(start), messages, buffer, stream)
+      let Batch(current:, waiting:, packets:) = batch
+      let new_batch = case packets == 1000 {
+        True -> {
+          actor.send(batch_subject, BatchCompleted(current))
+          Batch(current: current + 1, waiting: waiting + 1, packets: 0)
+        }
+        False -> {
+          Batch(..batch, packets: packets + 1)
+        }
+      }
+      recv(
+        socket,
+        Some(start),
+        messages,
+        buffer,
+        stream,
+        batch_subject,
+        new_batch,
+      )
     }
     Error(e) -> {
       case start_opt {
@@ -120,11 +228,7 @@ fn recv(
           Error(e)
         }
         Some(start) -> {
-          let now = timestamp.system_time()
-          let d = timestamp.difference(start, now)
-          let #(secs, nanos) = duration.to_seconds_and_nanoseconds(d)
-          let ms_from_ns = nanos / 1_000_000
-          Ok(#(secs * 1000 + ms_from_ns, messages))
+          Ok(#(time_from(start), messages))
         }
       }
     }
@@ -208,10 +312,10 @@ fn handle_prefixed(
   }
 }
 
-fn generate_customer(id: Int, max_date: Int, max_span: Int) -> tree.Customer {
-  let start = random.sample(random.int(1, max_date - max_span), seed.random())
-  let span = random.sample(random.int(1, max_span), seed.random())
-  tree.Customer(id, start, start + span)
+fn generate_customer(id: Int, max_date: Int, max_span: Int, seed: seed.Seed) -> #(tree.Customer, seed.Seed) {
+  let #(start, seed) = random.step(random.int(1, max_date - max_span), seed)
+  let #(span, seed) = random.step(random.int(1, max_span), seed)
+  #(tree.Customer(id, start, start + span), seed)
 }
 
 fn generate_customers(
@@ -219,6 +323,13 @@ fn generate_customers(
   max_date: Int,
   max_span: Int,
 ) -> List(tree.Customer) {
-  list.range(1, n)
-  |> list.map(fn(date) { generate_customer(date, max_date, max_span) })
+  let seed = seed.new(42)
+  let list: List(tree.Customer) = []
+  let #(list, _) = list.range(1, n)
+  |> list.fold(#(list, seed), fn(acc, date) { 
+    let #(list, seed) = acc
+    let #(customer, seed) = generate_customer(date, max_date, max_span, seed)
+    #( [customer, ..list], seed)
+  })
+  list
 }

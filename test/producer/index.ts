@@ -1,4 +1,6 @@
 import { connect, Socket } from "node:net";
+import seedrandom from "seedrandom";
+const rng = seedrandom("42"); // seed = "42"
 
 const MAX_DATE = parseInt(process.env.MAX_DATE || "100000");
 const ROUTER_HOST = process.env.ROUTER_HOST || "localhost";
@@ -44,8 +46,8 @@ function* handleMessages(): Generator<string, void, unknown> {
   for (let i = 0; i < EVENT_COUNT; i++) {
     const event: Event = {
       id: id++,
-      date: Math.floor(Math.random() * MAX_DATE) + 1,
-      type: "type" + Math.floor(Math.random() * 10), // Random type 0-9
+      date: Math.floor(rng() * MAX_DATE) + 1,
+      type: "type" + Math.floor(rng() * 10), // Random type 0-9
     };
     yield JSON.stringify(event);
   }
@@ -54,7 +56,7 @@ function* handleMessages(): Generator<string, void, unknown> {
   console.log("Producer took", new Date().getTime() - startTime.getTime(), "ms to send", EVENT_COUNT, "events");
 }
 
-const handleConnection = (socket: Socket): void => {
+const handleConnection = async (socket: Socket): Promise<void> => {
   console.log(`Connected to filter at ${ROUTER_HOST}:${ROUTER_PORT}`);
   socket.on('error', (err: Error) => {
     console.error('Connection error:', err);
@@ -66,9 +68,24 @@ const handleConnection = (socket: Socket): void => {
     process.exit(0);
   });
 
+  // Helper function to write with backpressure
+  const writeWithBackpressure = async (data: Buffer): Promise<void> => {
+    return new Promise((resolve) => {
+      const canWriteMore = socket.write(data);
+
+      if (canWriteMore) {
+        // Write was successful, can continue immediately
+        resolve();
+      } else {
+        setTimeout(resolve, 50)
+      }
+    })
+  };
+
   console.log('Connected to filter');
   let buffer = Buffer.allocUnsafe(MSS);
   let offset = 0;
+  let buffersSent = 0;
 
   for (const message of handleMessages()) {
     const messageBytes = Buffer.from(message, 'utf8');
@@ -76,7 +93,8 @@ const handleConnection = (socket: Socket): void => {
 
     if (newOffset > MSS) {
       // Send current buffer and start a new one
-      socket.write(buffer.subarray(0, offset));
+      await writeWithBackpressure(buffer.subarray(0, offset));
+      buffersSent++;
       buffer = Buffer.allocUnsafe(MSS);
       offset = 0;
     }
@@ -89,16 +107,16 @@ const handleConnection = (socket: Socket): void => {
 
   // Send remaining data
   if (offset > 0) {
-    socket.write(buffer.subarray(0, offset));
+    await writeWithBackpressure(buffer.subarray(0, offset));
+    buffersSent++;
   }
 
   socket.end();
-  console.log('Data sent, connection closed');
 };
 
 // Start the producer after waiting for filter to be ready
 async function main() {
-  handleConnection(await waitForFilter());
+  await handleConnection(await waitForFilter());
 }
 
 main().catch((err) => {
