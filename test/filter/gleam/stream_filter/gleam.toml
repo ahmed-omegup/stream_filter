@@ -11,3 +11,4 @@ prng = ">= 4.0.1 and < 5.0.0"
 gleam_json = ">= 3.0.2 and < 4.0.0"
 mug = ">= 3.0.0 and < 4.0.0"
 envoy = ">= 1.0.2 and < 2.0.0"
+bravo = { git = "https://github.com/dvic/bravo.git", ref = "update-dependencies" }

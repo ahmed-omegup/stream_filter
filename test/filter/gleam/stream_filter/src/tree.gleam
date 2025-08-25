@@ -1,20 +1,26 @@
 import gleam/erlang/process.{type Subject}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
+import gleam/io
+import gleam/int
 
 const split_threshold = 10
+const process_threshold = 64
 
 pub type Customer {
   Customer(id: Int, start: Int, stop: Int)
 }
 
-pub type WithBatchId {
-  WithBatchId(chan: Subject(NodeMessage), batch: Int)
-}
+type NodeId = Int
 
+pub type WithBatchId {
+  WithBatchId(node: NodeId, batch: Int)
+}
 pub type Value {
   Partial(List(Customer))
-  Parent(left: WithBatchId, right: WithBatchId)
+  Parent(WithBatchId, WithBatchId)
 }
 
 pub type Node {
@@ -25,7 +31,15 @@ pub type Node {
     full: List(Customer),
     value: Value,
     notify_parent: fn(Int) -> Nil,
+    pid: Option(Subject(NodeMessage)),
+    leaf_count: Int,
+    current_batch: Int,
   )
+}
+
+pub type Dir {
+  Left
+  Right
 }
 
 pub type NodeMessage {
@@ -33,7 +47,7 @@ pub type NodeMessage {
   Insert(Customer, fn(Int) -> Nil)
   Dispatch(date: Int, fun: fn(Int) -> Nil)
   SetBatch(batch_id: Int)
-  BatchComplete(batch_id: Int, left: Bool)
+  BatchComplete(batch_id: Int, path: List(Dir))
 }
 
 fn redistribute(cs: List(Customer), l: WithBatchId, r: WithBatchId, mid: Int) {
