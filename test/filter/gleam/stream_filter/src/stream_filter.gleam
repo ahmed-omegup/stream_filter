@@ -1,3 +1,5 @@
+import bravo
+import bravo/uset
 import envoy
 import gleam/bit_array
 import gleam/dynamic/decode
@@ -13,7 +15,7 @@ import gleam/string
 import gleam/time/duration
 import gleam/time/timestamp
 import glisten/socket
-import glisten/socket/options.{ActiveMode, Any, Ip, Passive, Buffer}
+import glisten/socket/options.{ActiveMode, Any, Buffer, Ip, Passive}
 import glisten/tcp
 import mug
 import prng/random
@@ -36,7 +38,7 @@ type Batch {
 
 type GlobalState {
   GlobalState(
-    root: process.Subject(tree.NodeMessage),
+    root_actor: process.Subject(tree.NodeMessage),
     event_decoder: decode.Decoder(Event),
     router: mug.Socket,
   )
@@ -45,7 +47,6 @@ type GlobalState {
 fn env(env: String, default: a, parse: fn(String) -> Result(a, Nil)) -> a {
   result.unwrap(result.try(envoy.get(env), parse), default)
 }
-
 
 pub fn main() {
   let event_decoder = {
@@ -62,45 +63,58 @@ pub fn main() {
   let max_date = env("MAX_DATE", 100_000, int.parse)
   let max_span = env("MAX_SPAN", 10, int.parse)
 
-  let listen_res = tcp.listen(8080, [ActiveMode(Passive), Ip(Any), 
-  Buffer(10240),        // Very small buffer - should fill quickly
-  options.Nodelay(False),     // Enable Nagle algorithm to batch packets
-  options.SendTimeout(100),  // Short send timeout
-  options.Backlog(10),         // Very small connection backlog
-])
+  let listen_res =
+    tcp.listen(8080, [
+      ActiveMode(Passive),
+      Ip(Any),
+      Buffer(10_240),
+      // Very small buffer - should fill quickly
+      options.Nodelay(False),
+      // Enable Nagle algorithm to batch packets
+      options.SendTimeout(100),
+      // Short send timeout
+      options.Backlog(10),
+      // Very small connection backlog
+    ])
   let assert Ok(listener) = listen_res as "Listen failed"
-
-  let assert Ok(router_socket) =
-    mug.new(router_host, port: router_port)
-    |> mug.timeout(milliseconds: 5000)
-    |> mug.connect()
 
   // Create batch completion subject
   let batch_subject = process.new_subject()
 
-  // Create root with batch notifier
-  let assert Ok(root) =
-    tree.start(1, max_date, fn(batch_id) {
+  // Create root node
+  let root_id = 1
+
+  let assert Ok(store) = uset.new("state", bravo.Public)
+
+  let root = tree.Actor(root_id, store)
+
+  let node =
+    tree.new_node(root, 1, max_date, fn(batch_id) {
       actor.send(batch_subject, BatchCompleted(batch_id))
     })
+
+  // Create root actor
+  let root_actor = tree.start(root, node)
 
   let customers = generate_customers(num_customers, max_date, max_span)
   customers
   |> list.each(fn(c) {
-    actor.send(
-      root.data,
+    tree.handle1(
+      root,
       tree.Insert(c, fn(batch_id) {
-        actor.send(root.data, tree.BatchComplete(batch_id, []))
+        actor.send(root_actor, tree.BatchComplete(batch_id, root_id))
       }),
     )
   })
 
+  let assert Ok(router) =
+    mug.new(router_host, port: router_port)
+    |> mug.timeout(milliseconds: 5000)
+    |> mug.connect()
+    as "Couldn't Connect to router"
+
   let assert Ok(actor.Started(_, stream)) =
-    actor.new(GlobalState(
-      root: root.data,
-      event_decoder: event_decoder,
-      router: router_socket,
-    ))
+    actor.new(GlobalState(root_actor:, event_decoder:, router:))
     |> actor.on_message(handle_message)
     |> actor.start
 
@@ -256,7 +270,7 @@ fn handle_message(state: GlobalState, msg: BitArray) {
   case json.parse_bits(msg, state.event_decoder) {
     Ok(event) -> {
       actor.send(
-        state.root,
+        state.root_actor,
         tree.Dispatch(event.date, fn(customer_id) {
           let assert Ok(_) = mug.send(state.router, <<customer_id:32>>)
           Nil
@@ -312,7 +326,12 @@ fn handle_prefixed(
   }
 }
 
-fn generate_customer(id: Int, max_date: Int, max_span: Int, seed: seed.Seed) -> #(tree.Customer, seed.Seed) {
+fn generate_customer(
+  id: Int,
+  max_date: Int,
+  max_span: Int,
+  seed: seed.Seed,
+) -> #(tree.Customer, seed.Seed) {
   let #(start, seed) = random.step(random.int(1, max_date - max_span), seed)
   let #(span, seed) = random.step(random.int(1, max_span), seed)
   #(tree.Customer(id, start, start + span), seed)
@@ -325,11 +344,12 @@ fn generate_customers(
 ) -> List(tree.Customer) {
   let seed = seed.new(42)
   let list: List(tree.Customer) = []
-  let #(list, _) = list.range(1, n)
-  |> list.fold(#(list, seed), fn(acc, date) { 
-    let #(list, seed) = acc
-    let #(customer, seed) = generate_customer(date, max_date, max_span, seed)
-    #( [customer, ..list], seed)
-  })
+  let #(list, _) =
+    list.range(1, n)
+    |> list.fold(#(list, seed), fn(acc, date) {
+      let #(list, seed) = acc
+      let #(customer, seed) = generate_customer(date, max_date, max_span, seed)
+      #([customer, ..list], seed)
+    })
   list
 }

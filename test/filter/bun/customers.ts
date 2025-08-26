@@ -9,7 +9,6 @@ export interface Customer {
   start: number;
   end: number;
   type: string;
-  splitsLeft: number; // Number of splits remaining, 0 means no more splits allowed
 }
 
 // Generate customers

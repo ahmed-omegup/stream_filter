@@ -53,23 +53,11 @@ export class TreeNode {
   }
 
   private _insertIntoChildren(customer: Customer): void {
-    if (customer.end <= this.mid) {
+    if (customer.start <= this.mid) {
       this.left!.insert(customer);
-    } else if (customer.start > this.mid) {
+    } 
+    if (customer.end > this.mid) {
       this.right!.insert(customer);
-    } else {
-      // Customer spans both sides
-      if (customer.splitsLeft) {
-        // Duplicate customer into both children with decremented splits
-        const leftCustomer: Customer = { ...customer, splitsLeft: customer.splitsLeft - 1 };
-        const rightCustomer: Customer = { ...customer, splitsLeft: customer.splitsLeft - 1 };
-        
-        this.left!.insert(leftCustomer);
-        this.right!.insert(rightCustomer);
-      } else {
-        // No splits left, keep in partial
-        this.partialCustomers.push(customer);
-      }
     }
   }
 
