@@ -6,7 +6,7 @@ import gleam/otp/actor
 
 const split_threshold = 10
 
-const process_threshold = 64
+const min_process_leaves = 32
 
 pub fn get(set: Store, id: NodeId) -> Node {
   let assert Ok(node) = uset.lookup(set, id)
@@ -36,6 +36,10 @@ pub type Value {
   Parent(WithBatchId, WithBatchId)
 }
 
+pub type MsgToParent {
+  NewBatchId(batch_id: Int)
+}
+
 pub type Node {
   Node(
     min: Int,
@@ -43,7 +47,7 @@ pub type Node {
     mid: Int,
     full: List(Customer),
     value: Value,
-    notify_parent: fn(Int) -> Nil,
+    notify_parent: fn(MsgToParent) -> Nil,
     pid: Option(Subject(NodeMessage)),
     leaf_count: Int,
     current_batch: Int,
@@ -57,7 +61,7 @@ pub type Dir {
 
 pub type NodeMessage {
   GetState(Subject(Node))
-  Insert(Customer, fn(Int) -> Nil)
+  Insert(Customer, fn(MsgToParent) -> Nil)
   Dispatch(date: Int, fun: fn(Int) -> Nil)
   SetBatch(batch_id: Int)
   BatchComplete(batch_id: Int, node_id: NodeId)
@@ -93,39 +97,42 @@ fn route_customer(
 ) {
   let Customer(_, start, stop) = c
   let lc = case start <= mid {
-    True ->
-      send_to_node(
-        set,
-        l_id,
-        l,
-        Insert(c, fn(batch_id) {
-          send_to_node(set, l_id, l, BatchComplete(batch_id, l_id), void)
-        }),
-        id,
-      )
+    True -> insert(set, l_id, l, c)
     False -> l.leaf_count
   }
   let rc = case stop > mid {
-    True ->
-      send_to_node(
-        set,
-        r_id,
-        r,
-        Insert(c, fn(batch_id) {
-          send_to_node(set, r_id, r, BatchComplete(batch_id, r_id), void)
-        }),
-        id,
-      )
+    True -> insert(set, r_id, r, c)
     False -> r.leaf_count
   }
   lc + rc
 }
 
-fn void(_: a) -> Nil {
+pub fn insert(set: Store, node_id: NodeId, node: Node, c: Customer) {
+  send_to_node(
+    set,
+    node_id,
+    node,
+    Insert(c, fn(msg) {
+      case msg {
+        NewBatchId(batch_id) ->
+          send_to_node(
+            set,
+            node_id,
+            node,
+            BatchComplete(batch_id, node_id),
+            void,
+          )
+      }
+    }),
+    id,
+  )
+}
+
+pub fn void(_: a) -> Nil {
   Nil
 }
 
-fn id(x: a) -> a {
+pub fn id(x: a) -> a {
   x
 }
 
@@ -157,7 +164,12 @@ fn send_to_node(
   f(c)
 }
 
-pub fn new_node(actor: Actor, min: Int, max: Int, notifier: fn(Int) -> Nil) {
+pub fn new_node(
+  actor: Actor,
+  min: Int,
+  max: Int,
+  notifier: fn(MsgToParent) -> Nil,
+) {
   update(
     actor,
     Node(
@@ -202,13 +214,13 @@ pub fn handle1(actor: Actor, msg: NodeMessage) -> Int {
   }
 }
 
-pub fn start(actor: Actor, node: Node) {
+pub fn start(actor: Actor, node: Node, f: fn(Subject(NodeMessage)) -> a) -> a {
   let assert Ok(actor.Started(_, pid)) =
     actor.new(actor)
     |> actor.on_message(handle)
     |> actor.start
   update(actor, Node(..node, pid: Some(pid)))
-  pid
+  f(pid)
 }
 
 fn update(actor: Actor, node: Node) {
@@ -219,7 +231,7 @@ fn update(actor: Actor, node: Node) {
 fn insert_customer(
   actor: Actor,
   customer: Customer,
-  notify_self: fn(Int) -> Nil,
+  notify_self: fn(MsgToParent) -> Nil,
 ) -> Int {
   let node = get(actor.set, actor.id)
   let Node(min, max, mid, ..) = node
@@ -229,8 +241,8 @@ fn insert_customer(
       update(actor, Node(..node, full: [customer, ..node.full]))
       node.leaf_count
     }
-    False ->
-      case node.value {
+    False -> {
+      let node = case node.value {
         Partial(data) ->
           case list.length(data) + 1 > split_threshold && min != max {
             True -> {
@@ -254,10 +266,10 @@ fn insert_customer(
               update(
                 actor,
                 Node(..node, full: [], value: Parent(l_id, r_id), leaf_count:),
-              ).leaf_count
+              )
             }
             False -> {
-              update(actor, Node(..node, value: Partial([customer, ..data]))).leaf_count
+              update(actor, Node(..node, value: Partial([customer, ..data])))
             }
           }
         Parent(WithBatchId(l_id, _), WithBatchId(r_id, _)) -> {
@@ -265,9 +277,17 @@ fn insert_customer(
           let right = get(actor.set, r_id)
           let leaf_count =
             route_customer(customer, actor.set, l_id, left, r_id, right, mid)
-          update(actor, Node(..node, leaf_count: leaf_count)).leaf_count
+          update(actor, Node(..node, leaf_count: leaf_count))
         }
       }
+      // let Nil = case node.leaf_count >= 2 * min_process_leaves {
+      //   True -> {
+      //     start(actor, node, void)
+      //   }
+      //   _ -> Nil
+      // }
+      node.leaf_count
+    }
   }
 }
 
@@ -309,7 +329,7 @@ fn set_batch(actor: Actor, batch_id: Int) -> Int {
     }
     Partial(_) -> {
       // Leaf node - Instantly notify parent
-      node.notify_parent(batch_id)
+      node.notify_parent(NewBatchId(batch_id))
       update(actor, Node(..node, current_batch: batch_id))
     }
   }.leaf_count
@@ -347,7 +367,7 @@ fn handle_batch_complete(
         new_left.batch >= completed_batch_id
         && new_right.batch >= completed_batch_id
       {
-        True -> node.notify_parent(completed_batch_id)
+        True -> node.notify_parent(NewBatchId(completed_batch_id))
         False -> Nil
       }
       update(actor, new_node)

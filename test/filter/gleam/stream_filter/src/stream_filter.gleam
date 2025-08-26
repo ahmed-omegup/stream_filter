@@ -20,7 +20,7 @@ import glisten/tcp
 import mug
 import prng/random
 import prng/seed
-import tree
+import tree.{id}
 
 type BufferState {
   BufferState(size: Int, buffer: BitArray)
@@ -89,23 +89,19 @@ pub fn main() {
   let root = tree.Actor(root_id, store)
 
   let node =
-    tree.new_node(root, 1, max_date, fn(batch_id) {
-      actor.send(batch_subject, BatchCompleted(batch_id))
+    tree.new_node(root, 1, max_date, fn(msg) {
+      case msg {
+        tree.NewBatchId(batch_id) ->
+          actor.send(batch_subject, BatchCompleted(batch_id))
+      }
     })
 
   // Create root actor
-  let root_actor = tree.start(root, node)
+  let root_actor = tree.start(root, node, id)
 
   let customers = generate_customers(num_customers, max_date, max_span)
   customers
-  |> list.each(fn(c) {
-    tree.handle1(
-      root,
-      tree.Insert(c, fn(batch_id) {
-        actor.send(root_actor, tree.BatchComplete(batch_id, root_id))
-      }),
-    )
-  })
+  |> list.each(fn(c) { tree.insert(store, root_id, node, c) })
 
   let assert Ok(router) =
     mug.new(router_host, port: router_port)
