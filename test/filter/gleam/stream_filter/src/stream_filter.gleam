@@ -90,7 +90,7 @@ pub fn main() {
     actor.send(
       root.data,
       tree.Insert(c, fn(batch_id) {
-        actor.send(root.data, tree.BatchComplete(batch_id, True))
+        actor.send(root.data, tree.BatchComplete(batch_id, []))
       }),
     )
   })

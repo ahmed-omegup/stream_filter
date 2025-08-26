@@ -1,23 +1,35 @@
+import bravo/uset
 import gleam/erlang/process.{type Subject}
+import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
-import gleam/io
-import gleam/int
+import gleam/set
 
 const split_threshold = 10
+
 const process_threshold = 64
 
 pub type Customer {
   Customer(id: Int, start: Int, stop: Int)
 }
 
-type NodeId = Int
+pub type Store =
+  uset.USet(NodeId, Node)
+
+pub type Actor {
+  Actor(id: NodeId, set: Store)
+}
+
+type NodeId =
+  Int
 
 pub type WithBatchId {
   WithBatchId(node: NodeId, batch: Int)
 }
+
 pub type Value {
   Partial(List(Customer))
   Parent(WithBatchId, WithBatchId)
@@ -32,7 +44,6 @@ pub type Node {
     value: Value,
     notify_parent: fn(Int) -> Nil,
     pid: Option(Subject(NodeMessage)),
-    leaf_count: Int,
     current_batch: Int,
   )
 }
@@ -47,122 +58,143 @@ pub type NodeMessage {
   Insert(Customer, fn(Int) -> Nil)
   Dispatch(date: Int, fun: fn(Int) -> Nil)
   SetBatch(batch_id: Int)
-  BatchComplete(batch_id: Int, path: List(Dir))
+  BatchComplete(batch_id: Int, node_id: NodeId)
 }
 
-fn redistribute(cs: List(Customer), l: WithBatchId, r: WithBatchId, mid: Int) {
+fn redistribute(cs: List(Customer), set: Store, l: NodeId, r: NodeId, mid: Int) {
   case cs {
     [] -> Nil
     [c, ..rest] -> {
-      route_customer(c, l, r, mid)
-      redistribute(rest, l, r, mid)
+      route_customer(c, set, l, r, mid)
+      redistribute(rest, set, l, r, mid)
     }
   }
 }
 
-fn route_customer(c: Customer, l: WithBatchId, r: WithBatchId, mid: Int) {
+fn route_customer(c: Customer, set: Store, l: NodeId, r: NodeId, mid: Int) {
   let Customer(_, start, stop) = c
   case start <= mid {
     True ->
-      actor.send(
-        l.chan,
-        Insert(c, fn(batch_id) { actor.send(l.chan, BatchComplete(batch_id, True)) }),
+      send_to_node_id(
+        set,
+        l,
+        Insert(c, fn(batch_id) {
+          send_to_node_id(set, l, BatchComplete(batch_id, l))
+        }),
       )
     False -> Nil
   }
   case stop > mid {
     True ->
-      actor.send(
-        r.chan,
-        Insert(c, fn(batch_id) { actor.send(r.chan, BatchComplete(batch_id, False)) }),
+      send_to_node_id(
+        set,
+        r,
+        Insert(c, fn(batch_id) {
+          send_to_node_id(set, r, BatchComplete(batch_id, r))
+        }),
       )
     False -> Nil
   }
 }
 
-pub fn start(
-  min: Int,
-  max: Int,
-  notifier: fn(Int) -> Nil,
-) -> Result(actor.Started(Subject(NodeMessage)), actor.StartError) {
-  let node = Node(min, max, { min + max } / 2, [], Partial([]), notifier)
-
-  actor.new(node)
-  |> actor.on_message(handle)
-  |> actor.start
-}
-
-pub fn handle(state: Node, msg: NodeMessage) -> actor.Next(Node, NodeMessage) {
-  case msg {
-    GetState(reply) -> {
-      actor.send(reply, state)
-      actor.continue(state)
-    }
-    Insert(customer, notify_self) -> {
-      let new_state = insert_customer(state, customer, notify_self)
-      actor.continue(new_state)
-    }
-    Dispatch(date, fun) -> {
-      dispatch(state, date, fun)
-      actor.continue(state)
-    }
-    SetBatch(batch_id) -> {
-      let new_state = set_batch(state, batch_id)
-      actor.continue(new_state)
-    }
-    BatchComplete(batch_id, is_left) -> {
-      let new_state = handle_batch_complete(state, batch_id, is_left)
-      actor.continue(new_state)
+// TODO: This needs to be implemented to look up node by ID and 
+// either send message to process or handle recursively
+fn send_to_node_id(set: Store, node_id: NodeId, msg: NodeMessage) {
+  let assert Ok(node) = uset.lookup(set, node_id)
+  case node.pid {
+    Some(pid) -> actor.send(pid, msg)
+    None -> {
+      handle1(Actor(node_id, set), msg)
+      Nil
     }
   }
 }
 
+pub fn new_node(min: Int, max: Int, notifier: fn(Int) -> Nil) {
+  Node(
+    min: min,
+    max: max,
+    mid: { min + max } / 2,
+    full: [],
+    value: Partial([]),
+    notify_parent: notifier,
+    pid: None,
+    current_batch: 0,
+  )
+}
+
+pub fn handle(state: Actor, msg: NodeMessage) -> actor.Next(Actor, NodeMessage) {
+  let Nil = handle1(state, msg)
+  actor.continue(state)
+}
+
+pub fn handle1(actor: Actor, msg: NodeMessage) -> Nil {
+  let Actor(id, set) = actor
+  case msg {
+    GetState(reply) -> {
+      let assert Ok(state) = uset.lookup(set, id)
+      actor.send(reply, state)
+    }
+    Insert(customer, notify_self) -> {
+      insert_customer(actor, customer, notify_self)
+    }
+    Dispatch(date, fun) -> {
+      dispatch(actor, date, fun)
+    }
+    SetBatch(batch_id) -> {
+      set_batch(actor, batch_id)
+    }
+    BatchComplete(batch_id, path) -> {
+      handle_batch_complete(actor, batch_id, path)
+    }
+  }
+}
+
+fn update(actor: Actor, node: Node) {
+  let assert Ok(Nil) = uset.insert(actor.set, actor.id, node)
+  Nil
+}
+
 fn insert_customer(
-  state: Node,
+  actor: Actor,
   customer: Customer,
   notify_self: fn(Int) -> Nil,
-) -> Node {
-  let Node(min, max, mid, full, value, notify_parent) = state
+) -> Nil {
+  let assert Ok(state) = uset.lookup(actor.set, actor.id)
+  let Node(min, max, mid, ..) = state
   let Customer(_, s, e) = customer
   case s <= min && e >= max {
-    True -> Node(min, max, mid, [customer, ..full], value, notify_parent)
+    True -> update(actor, Node(..state, full: [customer, ..state.full]))
     False ->
-      case value {
+      case state.value {
         Partial(data) ->
           case list.length(data) + 1 > split_threshold && min != max {
             True -> {
-              // Create children that will notify this node when batch completes
-              // But we need the subject reference of this node to create the notifier
-              // This is the chicken-and-egg problem we discussed earlier
-              let assert Ok(actor.Started(_, left_chan)) =
-                start(min, mid, notify_self)
-              let assert Ok(actor.Started(_, right_chan)) =
-                start(mid + 1, max, notify_self)
-              let left = WithBatchId(left_chan, 0)
-              let right = WithBatchId(right_chan, 0)
-              redistribute([customer, ..data], left, right, mid)
-              Node(min, max, mid, full, Parent(left, right), notify_parent)
+              let left = WithBatchId(actor.id * 2, 0)
+              let right = WithBatchId(actor.id * 2 + 1, 0)
+              let Nil =
+                redistribute(
+                  [customer, ..data],
+                  actor.set,
+                  left.node,
+                  right.node,
+                  mid,
+                )
+              update(actor, Node(..state, full: [], value: Parent(left, right)))
             }
             False ->
-              Node(
-                min,
-                max,
-                mid,
-                full,
-                Partial([customer, ..data]),
-                notify_parent,
-              )
+              update(actor, Node(..state, value: Partial([customer, ..data])))
           }
-        Parent(left, right) -> {
-          route_customer(customer, left, right, mid)
-          state
+        Parent(WithBatchId(left, _), WithBatchId(right, _)) -> {
+          route_customer(customer, actor.set, left, right, mid)
         }
       }
   }
 }
 
-fn dispatch(state: Node, date: Int, fun: fn(Int) -> Nil) {
-  let Node(_, _, mid, full, value, _) = state
+fn dispatch(actor: Actor, date: Int, fun: fn(Int) -> Nil) {
+  let assert Ok(state) = uset.lookup(actor.set, actor.id)
+  let Node(mid:, full:, value:, ..) = state
   case value {
     Partial(data) -> {
       list.each(data, fn(item) {
@@ -177,8 +209,10 @@ fn dispatch(state: Node, date: Int, fun: fn(Int) -> Nil) {
     }
     Parent(left, right) -> {
       case date <= mid {
-        True -> actor.send(left.chan, Dispatch(date, fun))
-        False -> actor.send(right.chan, Dispatch(date, fun))
+        True ->
+          send_to_node_id(actor.set, left.node, Dispatch(date, fun))
+        False ->
+          send_to_node_id(actor.set, right.node, Dispatch(date, fun))
       }
     }
   }
@@ -190,41 +224,99 @@ fn dispatch(state: Node, date: Int, fun: fn(Int) -> Nil) {
 }
 
 fn set_batch(state: Node, batch_id: Int) -> Node {
-  let Node(min, max, mid, full, value, notify_parent) = state
+  let Node(min, max, mid, full, value, notify_parent, pid, leaf_count, _) =
+    state
   case value {
     Parent(left, right) -> {
       // Forward batch ID to children
-      actor.send(left.chan, SetBatch(batch_id))
-      actor.send(right.chan, SetBatch(batch_id))
-      Node(min, max, mid, full, value, notify_parent)
+      send_to_node_id(left.node, SetBatch(batch_id))
+      send_to_node_id(right.node, SetBatch(batch_id))
+      Node(
+        min: min,
+        max: max,
+        mid: mid,
+        full: full,
+        value: value,
+        notify_parent: notify_parent,
+        pid: pid,
+        leaf_count: leaf_count,
+        current_batch: batch_id,
+      )
     }
     Partial(_) -> {
       // Leaf node - Instantly notify parent
       notify_parent(batch_id)
-      state
+      Node(
+        min: min,
+        max: max,
+        mid: mid,
+        full: full,
+        value: value,
+        notify_parent: notify_parent,
+        pid: pid,
+        leaf_count: leaf_count,
+        current_batch: batch_id,
+      )
     }
   }
 }
 
-fn handle_batch_complete(state: Node, completed_batch_id: Int, is_left: Bool) -> Node {
-  let Node(min, max, mid, full, value, notify_parent) = state
+fn handle_batch_complete(
+  state: Node,
+  completed_batch_id: Int,
+  path: List(Dir),
+) -> Node {
+  let Node(
+    min,
+    max,
+    mid,
+    full,
+    value,
+    notify_parent,
+    pid,
+    leaf_count,
+    current_batch,
+  ) = state
   case value {
-    Parent(WithBatchId(left_chan, left_batch), WithBatchId(right_chan, right_batch)) -> {
+    Parent(
+      WithBatchId(left_node, left_batch),
+      WithBatchId(right_node, right_batch),
+    ) -> {
+      // Determine which child completed based on path
+      let is_left = case path {
+        [Left, ..] -> True
+        _ -> False
+      }
+
       // Update the batch ID for the child that completed
       let new_left = case is_left {
-        True -> WithBatchId(left_chan, completed_batch_id)
-        False -> WithBatchId(left_chan, left_batch)
+        True -> WithBatchId(left_node, completed_batch_id)
+        False -> WithBatchId(left_node, left_batch)
       }
       let new_right = case is_left {
-        True -> WithBatchId(right_chan, right_batch)
-        False -> WithBatchId(right_chan, completed_batch_id)
+        True -> WithBatchId(right_node, right_batch)
+        False -> WithBatchId(right_node, completed_batch_id)
       }
-      
+
       let new_value = Parent(new_left, new_right)
-      let new_state = Node(min, max, mid, full, new_value, notify_parent)
+      let new_state =
+        Node(
+          min: min,
+          max: max,
+          mid: mid,
+          full: full,
+          value: new_value,
+          notify_parent: notify_parent,
+          pid: pid,
+          leaf_count: leaf_count,
+          current_batch: current_batch,
+        )
 
       // Notify parent when both children have completed the same batch
-      case new_left.batch >= completed_batch_id && new_right.batch >= completed_batch_id {
+      case
+        new_left.batch >= completed_batch_id
+        && new_right.batch >= completed_batch_id
+      {
         True -> notify_parent(completed_batch_id)
         False -> Nil
       }
