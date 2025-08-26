@@ -49,7 +49,7 @@ pub type Node {
     value: Value,
     notify_parent: fn(MsgToParent) -> Nil,
     pid: Option(Subject(NodeMessage)),
-    all_leaf_count: Int,
+    leaf_count: Int,
     current_batch: Int,
   )
 }
@@ -65,7 +65,6 @@ pub type NodeMessage {
   Dispatch(date: Int, fun: fn(Int) -> Nil)
   SetBatch(batch_id: Int)
   BatchComplete(batch_id: Int, node_id: NodeId)
-  Stop
 }
 
 fn redistribute(
@@ -87,13 +86,6 @@ fn redistribute(
   }
 }
 
-fn count_leaves(n: Node) {
-  case n.pid {
-    None -> n.all_leaf_count
-    _ -> 1
-  }
-}
-
 fn route_customer(
   c: Customer,
   set: Store,
@@ -106,11 +98,11 @@ fn route_customer(
   let Customer(_, start, stop) = c
   let lc = case start <= mid {
     True -> insert(set, l_id, l, c)
-    False -> count_leaves(l)
+    False -> l.leaf_count
   }
   let rc = case stop > mid {
     True -> insert(set, r_id, r, c)
-    False -> count_leaves(r)
+    False -> r.leaf_count
   }
   lc + rc
 }
@@ -166,7 +158,7 @@ fn send_to_node(
       1
     }
     None -> {
-      handle1(Actor(node_id, set), msg).0
+      handle1(Actor(node_id, set), msg)
     }
   }
   f(c)
@@ -188,41 +180,37 @@ pub fn new_node(
       value: Partial([]),
       notify_parent: notifier,
       pid: None,
-      all_leaf_count: 1,
+      leaf_count: 1,
       current_batch: 0,
     ),
   )
 }
 
 pub fn handle(actor: Actor, msg: NodeMessage) -> actor.Next(Actor, NodeMessage) {
-  let #(_, continue) = handle1(actor, msg)
-  case continue {
-    True -> actor.continue(actor)
-    False -> actor.stop()
-  }
+  let _ = handle1(actor, msg)
+  actor.continue(actor)
 }
 
-pub fn handle1(actor: Actor, msg: NodeMessage) -> #(Int, Bool) {
+pub fn handle1(actor: Actor, msg: NodeMessage) -> Int {
   let Actor(id, set) = actor
   case msg {
     GetState(reply) -> {
       let node = get(set, id)
       actor.send(reply, node)
-      #(count_leaves(node), True)
+      node.leaf_count
     }
     Insert(customer, notify_self) -> {
-      #(insert_customer(actor, customer, notify_self), True)
+      insert_customer(actor, customer, notify_self)
     }
     Dispatch(date, fun) -> {
-      #(dispatch(actor, date, fun), True)
+      dispatch(actor, date, fun)
     }
     SetBatch(batch_id) -> {
-      #(set_batch(actor, batch_id), True)
+      set_batch(actor, batch_id)
     }
     BatchComplete(batch_id, node_id) -> {
-      #(handle_batch_complete(actor, batch_id, node_id), True)
+      handle_batch_complete(actor, batch_id, node_id)
     }
-    Stop -> #(0, False)
   }
 }
 
@@ -251,7 +239,7 @@ fn insert_customer(
   case s <= min && e >= max {
     True -> {
       update(actor, Node(..node, full: [customer, ..node.full]))
-      count_leaves(node)
+      node.leaf_count
     }
     False -> {
       let node = case node.value {
@@ -264,7 +252,7 @@ fn insert_customer(
                 new_node(Actor(l_id.node, actor.set), min, mid, notify_self)
               let right =
                 new_node(Actor(r_id.node, actor.set), mid, max, notify_self)
-              let all_leaf_count =
+              let leaf_count =
                 redistribute(
                   [customer, ..data],
                   actor.set,
@@ -273,16 +261,11 @@ fn insert_customer(
                   r_id.node,
                   right,
                   mid,
-                  node.all_leaf_count,
+                  node.leaf_count,
                 )
               update(
                 actor,
-                Node(
-                  ..node,
-                  full: [],
-                  value: Parent(l_id, r_id),
-                  all_leaf_count:,
-                ),
+                Node(..node, full: [], value: Parent(l_id, r_id), leaf_count:),
               )
             }
             False -> {
@@ -292,37 +275,19 @@ fn insert_customer(
         Parent(WithBatchId(l_id, _), WithBatchId(r_id, _)) -> {
           let left = get(actor.set, l_id)
           let right = get(actor.set, r_id)
-          let all_leaf_count =
+          let leaf_count =
             route_customer(customer, actor.set, l_id, left, r_id, right, mid)
-          update(actor, Node(..node, all_leaf_count:))
+          update(actor, Node(..node, leaf_count: leaf_count))
         }
       }
-      let Nil = start_or_stop(actor, node)
-      count_leaves(node)
+      // let Nil = case node.leaf_count >= 2 * min_process_leaves {
+      //   True -> {
+      //     start(actor, node, void)
+      //   }
+      //   _ -> Nil
+      // }
+      node.leaf_count
     }
-  }
-}
-
-fn start_or_stop(actor: Actor, node: Node) -> Nil {
-  case node.all_leaf_count >= 2 * min_process_leaves {
-    True -> {
-      case node.pid {
-        None -> start(actor, node, void)
-        _ -> Nil
-      }
-    }
-    _ ->
-      case node.all_leaf_count < min_process_leaves {
-        True ->
-          case node.pid {
-            Some(pid) -> {
-              update(actor, Node(..node, pid: None))
-              actor.send(pid, Stop)
-            }
-            None -> Nil
-          }
-        _ -> Nil
-      }
   }
 }
 
@@ -350,12 +315,12 @@ pub fn dispatch(actor: Actor, date: Int, fun: fn(Int) -> Nil) -> Int {
     }
   }
   list.each(full, fn(item) { fun(item.id) })
-  count_leaves(node)
+  node.leaf_count
 }
 
 fn set_batch(actor: Actor, batch_id: Int) -> Int {
   let node = get(actor.set, actor.id)
-  count_leaves(case node.value {
+  case node.value {
     Parent(left, right) -> {
       // Forward batch ID to children
       send_to_node_id(actor.set, left.node, SetBatch(batch_id), void)
@@ -367,7 +332,7 @@ fn set_batch(actor: Actor, batch_id: Int) -> Int {
       node.notify_parent(NewBatchId(batch_id))
       update(actor, Node(..node, current_batch: batch_id))
     }
-  })
+  }.leaf_count
 }
 
 fn handle_batch_complete(
@@ -376,7 +341,7 @@ fn handle_batch_complete(
   child_node_id: NodeId,
 ) -> Int {
   let node = get(actor.set, actor.id)
-  count_leaves(case node.value {
+  case node.value {
     Parent(
       WithBatchId(left_node, left_batch),
       WithBatchId(right_node, right_batch),
@@ -411,5 +376,5 @@ fn handle_batch_complete(
       // Leaf nodes shouldn't receive BatchComplete messages
       node
     }
-  })
+  }.leaf_count
 }
