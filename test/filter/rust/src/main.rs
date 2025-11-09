@@ -3,8 +3,6 @@ use std::collections::LinkedList;
 use std::env;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
 
 mod tree;
@@ -47,12 +45,12 @@ fn main() -> io::Result<()> {
         tree.insert(customer);
     }
 
-    let tree = Arc::new(tree);
+
+    println!("{}", tree.leaves());
 
     // Connect to router
     let router_addr = format!("{}:{}", router_host, router_port);
-    let router_conn = TcpStream::connect(&router_addr)?;
-    let router_conn = Arc::new(std::sync::Mutex::new(router_conn));
+    let mut router_conn = TcpStream::connect(&router_addr)?;
 
     // Start TCP server
     let listener = TcpListener::bind("0.0.0.0:8080")?;
@@ -62,14 +60,10 @@ fn main() -> io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let tree_clone = Arc::clone(&tree);
-                let router_clone = Arc::clone(&router_conn);
-                
-                thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, tree_clone, router_clone) {
-                        eprintln!("Error handling connection: {}", e);
-                    }
-                });
+                if let Err(e) = handle_connection(stream, &tree, &mut router_conn) {
+                    eprintln!("Error handling connection: {}", e);
+                }
+                break;
             }
             Err(e) => {
                 eprintln!("Failed to accept connection: {}", e);
@@ -82,8 +76,8 @@ fn main() -> io::Result<()> {
 
 fn handle_connection(
     mut conn: TcpStream,
-    tree: Arc<TreeNode>,
-    router_conn: Arc<std::sync::Mutex<TcpStream>>,
+    tree: &TreeNode,
+    mut router_conn: &mut TcpStream,
 ) -> io::Result<()> {
     let start = Instant::now();
     let mut messages = 0;
@@ -100,7 +94,7 @@ fn handle_connection(
                     buffer.push_back(chunk[i]);
                 }
                 
-                let new_messages = process_buffer(&mut buffer, &tree, &router_conn)?;
+                let new_messages = process_buffer(&mut buffer, &tree, &mut router_conn)?;
                 messages += new_messages;
             }
             Err(e) => {
@@ -120,7 +114,7 @@ fn handle_connection(
 fn process_buffer(
     buffer: &mut LinkedList<u8>,
     tree: &TreeNode,
-    router_conn: &Arc<std::sync::Mutex<TcpStream>>,
+    router_conn: &mut TcpStream,
 ) -> io::Result<usize> {
     let mut messages = 0;
 
@@ -165,9 +159,7 @@ fn process_buffer(
                 tree.dispatch(event.date, &mut |customer_id| {
                     // Send to router
                     let data = (customer_id as u32).to_be_bytes();
-                    if let Ok(mut router) = router_conn.lock() {
-                        let _ = router.write_all(&data);
-                    }
+                    let _ = router_conn.write_all(&data);
                 });
                 messages += 1;
             }

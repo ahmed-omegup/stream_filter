@@ -33,6 +33,12 @@ impl TreeNode {
         }
     }
 
+    pub fn leaves(&self) -> i32 {
+        match &self.value {
+            Value::Parent(left, right) => left.leaves() + right.leaves(),
+            Value::Partial(_) => 1
+        }
+    }
     pub fn insert(&mut self, customer: Customer) {
         let start = customer.start;
         let end = customer.end;
